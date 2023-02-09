@@ -150,19 +150,7 @@ func main() {
     }
   }()
 
-  log.Printf("Watching %s\n", baseDirAbs)
-
-  files, err := ioutil.ReadDir(baseDirAbs)
-  if err != nil {
-    fmt.Fprintf(os.Stderr, "ReadDir Error: %s\n", err)
-    os.Exit(1)
-  }
-
-  for _, file := range files {
-    if !file.IsDir() && file.Name()[0] != '.' {
-      filesChan <- filepath.Join(baseDirAbs, file.Name())
-    }
-  }
+  log.Printf("Watching %s\n", queueDirAbs)
 
   // Create new watcher
   watcher, err := fsnotify.NewWatcher()
@@ -208,6 +196,20 @@ func main() {
     fmt.Fprintf(os.Stderr, "Watcher.Add() Error: %s\n", err)
     os.Exit(1)
   }
+
+  // process any files that are already in the queue directory
+  files, err := ioutil.ReadDir(queueDirAbs)
+  if err != nil {
+    fmt.Fprintf(os.Stderr, "ReadDir Error: %s\n", err)
+    os.Exit(1)
+  }
+
+  for _, file := range files {
+    if !file.IsDir() && file.Name()[0] != '.' {
+      filesChan <- filepath.Join(queueDirAbs, file.Name())
+    }
+  }
+
 
   // run until SIG
   for range interrupt {
