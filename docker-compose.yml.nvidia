@@ -1,0 +1,20 @@
+version: '3.3'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.nvidia
+    volumes:
+      - /home/ubuntu/watcher/encode:/media/watch
+    environment:
+      FFMPEG_INPUT_FLAGS: '-stats -hwaccel nvdec'
+      FFMPEG_OUTPUT_FLAGS: '-c:v h264_nvenc -r 29.97 -s:v 1920x1080 -cq:v 23 -c:a aac -b:a 128K -ar 44100'
+    restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

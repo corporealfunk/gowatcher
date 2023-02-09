@@ -15,17 +15,25 @@ import (
 /**
  * This program watches a directory for file creation and runs ffmpeg on any files
  * that are added to the directory or files that are present during program start.
- * ENV variables configure FFMPEG and the directory to watch:
- * WATCH_DIR=/path/to/directory/to/watch
+ * ENV variables configure FFMPEG and the base directory for the queue:
+ * BASE_DIR=/path/to/directory/base
  * FFMPEG_INPUT_FLAGS="flags to ffmpeg before the -i <filename> flag"
  * FFMPEG_OUTPUT_FLAGS="flags to ffmpeg after the -i <filename> flag"
  * Do not include "-i <filename>" in ffmpeg flags, nor the output filename
- * Output files will be placed into "WATCH_DIR/procd"
+ * Output files will be placed into "BASE_DIR/finished"
+ *
+ * The directories under BASE_DIR will be created as follows if they don't exists:
+ * ./working       files being encoded are placed here
+ * ./finished      encoded files are moved here when completed
+ * ./queue         move files here to encode them, this directory is being watched
+ * ./holding       if on a remote server, upload files here. when upload
+ *                 is complete, move them into ./queue
+ *
  * If using on a remote server, processing will start as soon as a file
  * is created, even if a network transport has not completed the file transfer
  * yet. To avoid processing files that have not completely transfered, upload
- * files to a separate (or sub directory) from the WATCH_DIR and then copy
- * them into the WATCH_DIR once upload is complete
+ * files to the ./holding directory, then move them into ./queue when the
+ * upload is complete
  */
 
 func main() {
@@ -34,33 +42,66 @@ func main() {
   signal.Notify(interrupt, os.Interrupt)
 
   // Create a channel of files from the watch directory
-  // WATCH_DIR=path
+  // BASE_DIR=path
   filesChan := make(chan string)
 
-  watchDir := os.Getenv("WATCH_DIR")
-  info, err := os.Stat(watchDir)
+  baseDir := os.Getenv("BASE_DIR")
 
-  if os.IsNotExist(err) || !info.IsDir() {
-    fmt.Fprintf(os.Stderr, "Directory %s does not exist\n", watchDir)
-    os.Exit(1)
-  }
-  watchDirAbs, err := filepath.Abs(watchDir)
+  exists, err := dirExists(baseDir)
 
   if err != nil {
-    fmt.Fprintf(os.Stderr, "Filepath Error: %s\n", err)
+    fmt.Fprintf(os.Stderr, "Directory %s error: %s\n", baseDir, err)
     os.Exit(1)
   }
 
-  // create procd directory if it doesn't exist
-  procdDirAbs := filepath.Join(watchDirAbs, "procd")
+  if !exists {
+    fmt.Fprintf(os.Stderr, "Directory %s does not exist\n", err)
+    os.Exit(1)
+  }
 
-  _, err = os.Stat(procdDirAbs)
+  baseDirAbs, err := filepath.Abs(baseDir)
 
-  if os.IsNotExist(err) {
-    if err := os.Mkdir(procdDirAbs, os.ModePerm); err != nil {
-      fmt.Fprintf(os.Stderr, "Could not create procd dir Error: %s\n", err)
-      os.Exit(1)
-    }
+  if err != nil {
+    fmt.Fprintf(os.Stderr, "Filepath ABS error: %s\n", err)
+    os.Exit(1)
+  }
+
+  // create queue directory
+  queueDirAbs := filepath.Join(baseDirAbs, "queue")
+
+  if err = createDir(queueDirAbs); err != nil {
+    fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+    os.Exit(1)
+  }
+
+  // create queue uploadDir
+  uploadDirAbs := filepath.Join(baseDirAbs, "upload")
+
+  if err = createDir(uploadDirAbs); err != nil {
+    fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+    os.Exit(1)
+  }
+
+  // create procd/working directory
+  workingDirAbs := filepath.Join(baseDirAbs, "working")
+
+  // remove workingDir first
+  if err = os.RemoveAll(workingDirAbs); err != nil {
+    fmt.Fprintf(os.Stderr, "Error removeing working files: %s\n", err)
+    os.Exit(1)
+  }
+
+  if err = createDir(workingDirAbs); err != nil {
+    fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+    os.Exit(1)
+  }
+
+  // create procd/finished directory
+  finishedDirAbs := filepath.Join(baseDirAbs, "finished")
+
+  if err = createDir(finishedDirAbs); err != nil {
+    fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+    os.Exit(1)
   }
 
   // start reading off the channel in a gofunc and running ffmpeg in a child process
@@ -76,32 +117,42 @@ func main() {
   ffmpegOutputFlags := strings.Fields(os.Getenv("FFMPEG_OUTPUT_FLAGS"))
 
   go func() {
-    for {
-      select {
-      case file := <-filesChan:
-        log.Printf("Work on: %s\n", file)
+    for file := range filesChan {
+      log.Printf("Work on: %s\n", file)
 
-        ffmpegCmdFlags := make([]string, 0)
+      ffmpegCmdFlags := make([]string, 0)
 
-        ffmpegCmdFlags = append(ffmpegCmdFlags, ffmpegInputFlags...)
-        ffmpegCmdFlags = append(ffmpegCmdFlags, "-i", file)
-        ffmpegCmdFlags = append(ffmpegCmdFlags, ffmpegOutputFlags...)
-        ffmpegCmdFlags = append(ffmpegCmdFlags, fmt.Sprintf("%s/%s", procdDirAbs, filepath.Base(file)))
-        log.Printf("Command: %s\n", ffmpegCmdFlags)
+      ffmpegCmdFlags = append(ffmpegCmdFlags, ffmpegInputFlags...)
+      ffmpegCmdFlags = append(ffmpegCmdFlags, "-i", file)
+      ffmpegCmdFlags = append(ffmpegCmdFlags, ffmpegOutputFlags...)
+      workingFilepath := fmt.Sprintf("%s/%s", workingDirAbs, filepath.Base(file))
+      ffmpegCmdFlags = append(ffmpegCmdFlags, workingFilepath)
+      log.Printf("Command: %s\n", ffmpegCmdFlags)
 
-        cmd := exec.Command(ffmpegPath, ffmpegCmdFlags...)
-        cmd.Stdout = os.Stdout
-        cmd.Stderr = os.Stderr
-        if err := cmd.Run(); err != nil {
-          fmt.Fprintf(os.Stderr, "FFMPEG Call Error: %s\n", err)
+      cmd := exec.Command(ffmpegPath, ffmpegCmdFlags...)
+      cmd.Stdout = os.Stdout
+      cmd.Stderr = os.Stderr
+      if err := cmd.Run(); err != nil {
+        fmt.Fprintf(os.Stderr, "FFMPEG Call Error: %s\n", err)
+      } else {
+        // move file from workingDirAbs to finsihedDirAbs
+        finishedFilePath := fmt.Sprintf("%s/%s", finishedDirAbs, filepath.Base(file))
+        err = os.Rename(workingFilepath, finishedFilePath)
+
+        if err != nil {
+          fmt.Fprintf(os.Stderr, "Could not move %s to %s: %s\n", workingFilepath, finishedFilePath, err)
+          os.Exit(1)
         }
+
+        // remove the queue original file
+        _ = os.Remove(file)
       }
     }
   }()
 
-  log.Printf("Watching %s\n", watchDirAbs)
+  log.Printf("Watching %s\n", baseDirAbs)
 
-  files, err := ioutil.ReadDir(watchDirAbs)
+  files, err := ioutil.ReadDir(baseDirAbs)
   if err != nil {
     fmt.Fprintf(os.Stderr, "ReadDir Error: %s\n", err)
     os.Exit(1)
@@ -109,7 +160,7 @@ func main() {
 
   for _, file := range files {
     if !file.IsDir() && file.Name()[0] != '.' {
-      filesChan <- filepath.Join(watchDirAbs, file.Name())
+      filesChan <- filepath.Join(baseDirAbs, file.Name())
     }
   }
 
@@ -151,7 +202,7 @@ func main() {
   }()
 
   // Add a path.
-  err = watcher.Add(watchDirAbs)
+  err = watcher.Add(queueDirAbs)
 
   if err != nil {
     fmt.Fprintf(os.Stderr, "Watcher.Add() Error: %s\n", err)
@@ -159,11 +210,8 @@ func main() {
   }
 
   // run until SIG
-  for {
-    select {
-    case <-interrupt:
-      fmt.Println("Interrupted!")
-    }
+  for range interrupt {
+    fmt.Println("Interrupted!")
     return
   }
 }
