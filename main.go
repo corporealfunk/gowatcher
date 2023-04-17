@@ -7,6 +7,7 @@ import (
   "os/signal"
   "os/exec"
   "io/ioutil"
+  "path"
   "path/filepath"
   "log"
   "github.com/fsnotify/fsnotify"
@@ -120,12 +121,16 @@ func main() {
     for file := range filesChan {
       log.Printf("Work on: %s\n", file)
 
+      // always convert to mp4 container
+      ext := path.Ext(file)
+      outFile := file[0:len(file) - len(ext)] + ".mp4"
+
       ffmpegCmdFlags := make([]string, 0)
 
       ffmpegCmdFlags = append(ffmpegCmdFlags, ffmpegInputFlags...)
       ffmpegCmdFlags = append(ffmpegCmdFlags, "-i", file)
       ffmpegCmdFlags = append(ffmpegCmdFlags, ffmpegOutputFlags...)
-      workingFilepath := fmt.Sprintf("%s/%s", workingDirAbs, filepath.Base(file))
+      workingFilepath := fmt.Sprintf("%s/%s", workingDirAbs, filepath.Base(outFile))
       ffmpegCmdFlags = append(ffmpegCmdFlags, workingFilepath)
       log.Printf("Command: %s\n", ffmpegCmdFlags)
 
@@ -136,7 +141,7 @@ func main() {
         fmt.Fprintf(os.Stderr, "FFMPEG Call Error: %s\n", err)
       } else {
         // move file from workingDirAbs to finsihedDirAbs
-        finishedFilePath := fmt.Sprintf("%s/%s", finishedDirAbs, filepath.Base(file))
+        finishedFilePath := fmt.Sprintf("%s/%s", finishedDirAbs, filepath.Base(outFile))
         err = os.Rename(workingFilepath, finishedFilePath)
 
         if err != nil {
